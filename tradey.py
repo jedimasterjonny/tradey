@@ -74,7 +74,7 @@ def iterate(current_values, additional_investment, target_weights):
     for pair in itertools.combinations(investment_indices, 2):
         result = minimize_scalar(
             fun=calculate_sse,
-            bounds=(0, additional_investment),
+            bounds=(100, additional_investment),
             args=(
                 pair,
                 current_values,
