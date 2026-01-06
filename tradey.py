@@ -151,7 +151,10 @@ if __name__ == "__main__":
     print("--- Optimal Allocation Found ---")
     print(f"Invest in this pair: '{name1}' and '{name2}'")
     print(
-        f"Optimal allocation: £{allocation1:,.2f} to '{name1}' and £{allocation2:,.2f} to '{name2}'\n"
+        f"Optimal allocation: £{allocation1:,.2f} to '{name1}' and £{allocation2:,.2f} to '{name2}'"
+    )
+    print(
+        f"Optimal allocation: {(allocation1 / additional_investment) * 100:,.2f}% to '{name1}' and {(allocation2 / additional_investment) * 100:,.2f}% to '{name2}'\n"
     )
 
     final_values = current_values.copy()
