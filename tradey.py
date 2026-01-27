@@ -3,7 +3,7 @@ import csv
 import itertools
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple, NamedTuple
+from typing import Dict, List, Optional, Tuple, NamedTuple
 
 import numpy as np
 from prettytable import PrettyTable
@@ -90,7 +90,10 @@ class Portfolio:
         )
 
     def optimize(
-        self, additional_investment: float, n_assets: int = 2
+        self,
+        additional_investment: float,
+        n_assets: int = 2,
+        excluded_assets: Optional[List[str]] = None,
     ) -> OptimizationResult:
         """
         Find optimal allocation for additional funds.
@@ -98,15 +101,29 @@ class Portfolio:
         Args:
             additional_investment: Amount of new valid to allocate.
             n_assets: Number of assets to split the investment across.
+            excluded_assets: List of asset names to exclude from optimization.
         """
         current_vals = self.current_values
         targets = self.target_weights
 
-        num_investments = len(current_vals)
-        if n_assets is None or n_assets > num_investments:
-            n_assets = num_investments
+        if excluded_assets is None:
+            excluded_assets = []
 
-        investment_indices = range(num_investments)
+        # Find indices of eligible investments (those not excluded)
+        eligible_indices = [
+            i
+            for i, name in enumerate(self.investment_names)
+            if name not in excluded_assets
+        ]
+
+        if not eligible_indices:
+            raise ValueError("No eligible assets available for optimization.")
+
+        num_eligible = len(eligible_indices)
+        if n_assets is None or n_assets > num_eligible:
+            n_assets = num_eligible
+
+        investment_indices = eligible_indices
 
         min_overall_sse = float("inf")
         best_combination = None
@@ -275,6 +292,13 @@ def parse_arguments() -> argparse.Namespace:
         default=2,
         help="Number of assets to distribute investment across (default: 2)",
     )
+    parser.add_argument(
+        "--exclude",
+        "-x",
+        nargs="+",
+        default=[],
+        help="List of asset names to exclude from optimization",
+    )
     return parser.parse_args()
 
 
@@ -284,7 +308,9 @@ def main():
     try:
         portfolio = Portfolio.from_csv(args.filepath)
         result = portfolio.optimize(
-            additional_investment=args.additional_investment, n_assets=args.n_assets
+            additional_investment=args.additional_investment,
+            n_assets=args.n_assets,
+            excluded_assets=args.exclude,
         )
         portfolio.print_summary(result, args.additional_investment)
 
