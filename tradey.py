@@ -2,7 +2,7 @@ import csv
 from pathlib import Path
 import numpy as np
 import itertools
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize, LinearConstraint, Bounds
 from prettytable import PrettyTable
 
 
@@ -62,53 +62,78 @@ def calculate_allocation_deviation(values, target_weights):
     return deviation
 
 
-def iterate(current_values, additional_investment, target_weights):
+def iterate(current_values, additional_investment, target_weights, n_assets=2):
     num_investments = len(current_values)
+    # If n_assets is None or greater than total investments, use all
+    if n_assets is None or n_assets > num_investments:
+        n_assets = num_investments
+
     investment_indices = range(num_investments)
 
     # We will store the best result found so far here
     min_overall_sse = float("inf")
-    best_pair = None
-    best_split = None
+    best_combination = None
+    best_allocations = None
 
-    for pair in itertools.combinations(investment_indices, 2):
-        result = minimize_scalar(
+    best_allocations = None
+
+    # Constraints: sum of allocations equals additional_investment
+    # cons = {"type": "eq", "fun": lambda x: np.sum(x) - additional_investment}
+
+    constraint_matrix = np.ones((1, n_assets))
+    linear_constraint = LinearConstraint(
+        constraint_matrix, [additional_investment], [additional_investment]
+    )
+
+    # Bounds: each allocation must be non-negative
+    # bounds = [(0, additional_investment) for _ in range(n_assets)]
+    # Use Bounds object for clearer definition
+    bounds = Bounds(np.zeros(n_assets), np.full(n_assets, additional_investment))
+
+    # Initial guess: distribute evenly
+    initial_guess = [additional_investment / n_assets] * n_assets
+
+    # Iterate over all combinations of size n_assets
+    for combination in itertools.combinations(investment_indices, n_assets):
+        result = minimize(
             fun=calculate_sse,
-            bounds=(100, additional_investment - 100),
+            x0=initial_guess,
             args=(
-                pair,
+                combination,
                 current_values,
-                additional_investment,
                 target_weights,
             ),
+            method="trust-constr",
+            bounds=bounds,
+            constraints=[linear_constraint],
+            jac=calculate_jacobian,
+            hess=calculate_hessian,
         )
 
         if result.fun < min_overall_sse:
             min_overall_sse = result.fun
-            best_pair = pair
-            best_split = result.x
+            best_combination = combination
+            best_allocations = result.x
 
     return {
-        "best_pair": best_pair,
-        "best_split": best_split,
+        "best_combination": best_combination,
+        "best_allocations": best_allocations,
         "min_sse": min_overall_sse,
     }
 
 
 def calculate_sse(
-    split_amount,
-    pair_indices,
+    allocations,
+    model_indices,
     current_vals,
-    additional_investment,
     target_weights,
 ):
     # Create a copy of the portfolio to modify
     new_values = current_vals.copy()
 
     # Allocate the new money based on the split
-    idx1, idx2 = pair_indices
-    new_values[idx1] += split_amount
-    new_values[idx2] += additional_investment - split_amount
+    model_indices = np.array(model_indices, dtype=int)
+    new_values[model_indices] += allocations
 
     # Calculate the new weights
     new_weights = calculate_allocation_deviation(new_values, target_weights)
@@ -118,12 +143,65 @@ def calculate_sse(
     return sse
 
 
+def calculate_jacobian(
+    allocations,
+    model_indices,
+    current_vals,
+    target_weights,
+):
+    """Calculate the gradient of the SSE function."""
+    total_value = np.sum(current_vals) + np.sum(allocations)
+
+    model_indices = np.array(model_indices, dtype=int)
+
+    # Get values for the active assets
+    active_current = current_vals[model_indices]
+    active_targets = target_weights[model_indices]
+    active_allocs = allocations
+
+    # Current values after allocation
+    active_final_values = active_current + active_allocs
+
+    # The term inside the square: (V / (T * Total)) - 1
+    # Derivative of SSE = sum(w^2) w.r.t alloc_i
+    # = 2 * w_i * d(w_i)/d(alloc_i)
+    # w_i = (V_i / (T_i * Total)) - 1
+    # d(w_i)/d(a_i) = 1 / (T_i * Total)
+
+    denom = active_targets * total_value
+    weights = (active_final_values / denom) - 1
+
+    grad = 2 * weights * (1 / denom)
+    return grad
+
+
+def calculate_hessian(
+    allocations,
+    model_indices,
+    current_vals,
+    target_weights,
+):
+    """Calculate the Hessian matrix of the SSE function."""
+    total_value = np.sum(current_vals) + np.sum(allocations)
+    model_indices = np.array(model_indices, dtype=int)
+    active_targets = target_weights[model_indices]
+
+    # Second derivative
+    # d2(SSE)/d(a_i)^2 = 2 * (1 / (T_i * Total))^2
+    # Off-diagonal terms are 0 (assuming Total is treated as constant or approximations are fine)
+
+    denom = active_targets * total_value
+    diag_values = 2 * (1 / denom) ** 2
+
+    return np.diag(diag_values)
+
+
 if __name__ == "__main__":
     filepath = "/Users/jonny/Downloads/Asset_Allocation.csv"
 
     portfolio_data = {}
     investment_names = []
-    additional_investment = 1500
+    additional_investment = 6416.06 + 1686.80
 
     try:
         portfolio_data = parse_asset_allocation(filepath)
@@ -137,29 +215,25 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error processing file: {e}")
 
-    result = iterate(current_values, additional_investment, target_weights)
+    result = iterate(current_values, additional_investment, target_weights, n_assets=2)
     investment_names = list(portfolio_data["allocations"])
 
-    best_pair = result["best_pair"]
-    best_split = result["best_split"]
-
-    allocation1 = best_split
-    allocation2 = additional_investment - best_split
-    name1 = investment_names[best_pair[0]]
-    name2 = investment_names[best_pair[1]]
+    best_combination = result["best_combination"]
+    best_allocations = result["best_allocations"]
 
     print("--- Optimal Allocation Found ---")
-    print(f"Invest in this pair: '{name1}' and '{name2}'")
-    print(
-        f"Optimal allocation: £{allocation1:,.2f} to '{name1}' and £{allocation2:,.2f} to '{name2}'"
-    )
-    print(
-        f"Optimal allocation: {(allocation1 / additional_investment) * 100:,.2f}% to '{name1}' and {(allocation2 / additional_investment) * 100:,.2f}% to '{name2}'\n"
-    )
+    print(f"Invest in: {[investment_names[i] for i in best_combination]}")
+    for idx, amount in zip(best_combination, best_allocations):
+        name = investment_names[idx]
+        print(
+            f"Optimal allocation: £{amount:,.2f} to '{name}' ({amount / additional_investment * 100:.2f}%)"
+        )
+    print("\n")
+    print(f"SSE: {result['min_sse']:.2e}\n")
 
     final_values = current_values.copy()
-    final_values[best_pair[0]] += allocation1
-    final_values[best_pair[1]] += allocation2
+    for idx, amount in zip(best_combination, best_allocations):
+        final_values[idx] += amount
 
     final_weights = calculate_allocation_deviation(final_values, target_weights)
     old_weight = calculate_allocation_deviation(current_values, target_weights)
