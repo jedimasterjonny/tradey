@@ -1,4 +1,8 @@
+from scipy.optimize import minimize, LinearConstraint, Bounds
+from prettytable import PrettyTable
 import argparse
+import multiprocessing
+from functools import partial
 import csv
 import itertools
 from dataclasses import dataclass, field
@@ -6,8 +10,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, NamedTuple
 
 import numpy as np
-from prettytable import PrettyTable
-from scipy.optimize import Bounds, LinearConstraint, minimize
 
 
 class OptimizationResult(NamedTuple):
@@ -96,7 +98,7 @@ class Portfolio:
         excluded_assets: Optional[List[str]] = None,
     ) -> OptimizationResult:
         """
-        Find optimal allocation for additional funds.
+        Find optimal allocation for additional funds using parallel processing.
 
         Args:
             additional_investment: Amount of new valid to allocate.
@@ -129,7 +131,49 @@ class Portfolio:
         best_combination = None
         best_allocations = None
 
+        # Prepare arguments for parallel execution
+        combinations = list(itertools.combinations(investment_indices, n_assets))
+
+        # Helper function arguments
+        func = partial(
+            self._optimize_combination,
+            additional_investment=additional_investment,
+            current_vals=current_vals,
+            targets=targets,
+            n_assets=n_assets,
+        )
+
+        # Use multiprocessing to speed up optimization
+        # Default to number of CPU cores
+        with multiprocessing.Pool() as pool:
+            results = pool.map(func, combinations)
+
+        # Find best result
+        for combination, result_fun, result_x in results:
+            if result_fun < min_overall_sse:
+                min_overall_sse = result_fun
+                best_combination = combination
+                best_allocations = result_x
+
+        return OptimizationResult(
+            best_combination=best_combination,  # type: ignore
+            best_allocations=best_allocations,
+            min_sse=min_overall_sse,
+        )
+
+    @classmethod
+    def _optimize_combination(
+        cls,
+        combination: Tuple[int, ...],
+        additional_investment: float,
+        current_vals: np.ndarray,
+        targets: np.ndarray,
+        n_assets: int,
+    ) -> Tuple[Tuple[int, ...], float, np.ndarray]:
+        """Helper method to optimize a single combination (static for pickling)."""
+
         # Constraint: Sum of allocations must equal additional_investment
+        # We assume n_assets matches len(combination)
         constraint_matrix = np.ones((1, n_assets))
         linear_constraint = LinearConstraint(
             constraint_matrix, [additional_investment], [additional_investment]
@@ -141,28 +185,18 @@ class Portfolio:
         # Initial guess: Even distribution
         initial_guess = [additional_investment / n_assets] * n_assets
 
-        for combination in itertools.combinations(investment_indices, n_assets):
-            result = minimize(
-                fun=self._calculate_sse,
-                x0=initial_guess,
-                args=(combination, current_vals, targets),
-                method="trust-constr",
-                bounds=bounds,
-                constraints=[linear_constraint],
-                jac=self._calculate_jacobian,
-                hess=self._calculate_hessian,
-            )
-
-            if result.fun < min_overall_sse:
-                min_overall_sse = result.fun
-                best_combination = combination
-                best_allocations = result.x
-
-        return OptimizationResult(
-            best_combination=best_combination,  # type: ignore
-            best_allocations=best_allocations,
-            min_sse=min_overall_sse,
+        result = minimize(
+            fun=cls._calculate_sse,
+            x0=initial_guess,
+            args=(combination, current_vals, targets),
+            method="trust-constr",
+            bounds=bounds,
+            constraints=[linear_constraint],
+            jac=cls._calculate_jacobian,
+            hess=cls._calculate_hessian,
         )
+
+        return combination, result.fun, result.x
 
     @staticmethod
     def _calculate_allocation_deviation(
