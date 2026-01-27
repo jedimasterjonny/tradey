@@ -4,6 +4,7 @@ import numpy as np
 import itertools
 from scipy.optimize import minimize, LinearConstraint, Bounds
 from prettytable import PrettyTable
+import argparse
 
 
 def parse_currency(value_str):
@@ -196,12 +197,35 @@ def calculate_hessian(
     return np.diag(diag_values)
 
 
-if __name__ == "__main__":
-    filepath = "/Users/jonny/Downloads/Asset_Allocation.csv"
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Calculate optimal asset allocation.")
+    parser.add_argument(
+        "--n-assets",
+        "-n",
+        type=int,
+        default=2,
+        help="Number of assets to distribute investment across (default: 2)",
+    )
+    parser.add_argument(
+        "filepath",
+        help="Path to the asset allocation CSV file",
+    )
+    parser.add_argument(
+        "additional_investment",
+        type=float,
+        help="Amount of additional cash to invest",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_arguments()
+    filepath = args.filepath
+    n_assets = args.n_assets
+    additional_investment = args.additional_investment
 
     portfolio_data = {}
     investment_names = []
-    additional_investment = 6416.06 + 1686.80
 
     try:
         portfolio_data = parse_asset_allocation(filepath)
@@ -211,11 +235,13 @@ if __name__ == "__main__":
 
     except FileNotFoundError:
         print(f"Error: Could not find file at {filepath}")
+        exit(1)
 
     except Exception as e:
         print(f"Error processing file: {e}")
+        exit(1)
 
-    result = iterate(current_values, additional_investment, target_weights, n_assets=2)
+    result = iterate(current_values, additional_investment, target_weights, n_assets)
     investment_names = list(portfolio_data["allocations"])
 
     best_combination = result["best_combination"]
@@ -253,3 +279,7 @@ if __name__ == "__main__":
             ]
         )
     print(output)
+
+
+if __name__ == "__main__":
+    main()
