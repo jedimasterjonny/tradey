@@ -3,19 +3,106 @@ from prettytable import PrettyTable
 import argparse
 import multiprocessing
 from functools import partial
-import csv
 import itertools
+import json
+import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
+
+from proto.client_pb2 import PClient
+
+
+# Precision constants used by Portfolio Performance
+_SHARE_PRECISION = 1e8
+_PRICE_PRECISION = 1e8
+
+_SIGNATURE = b"PPPBV1"
+
+# Fixed currency conversion factors (not available via exchange rate APIs)
+_FIXED_CURRENCY_FACTORS = {
+    "GBX": {"GBP": 0.01},  # pence to pounds
+}
+
+
+def _fetch_exchange_rates(base_currency: str, currencies: set[str]) -> dict[str, float]:
+    """Fetch exchange rates from the Frankfurter API (ECB data).
+
+    Returns a dict mapping each requested currency to its conversion factor
+    to the base currency.
+    """
+    if not currencies:
+        return {}
+
+    symbols = ",".join(sorted(currencies))
+    url = (
+        f"https://api.frankfurter.dev/v1/latest?base={base_currency}&symbols={symbols}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "tradey/1.0"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+
+    # API returns rates as base→foreign, we need foreign→base (i.e. 1/rate)
+    return {currency: 1.0 / rate for currency, rate in data["rates"].items()}
+
+
+def _read_client(filepath: Path):
+    """Read and parse a Portfolio Performance .portfolio file."""
+    with zipfile.ZipFile(filepath, "r") as zf:
+        raw = zf.read("data.portfolio")
+
+    signature = raw[: len(_SIGNATURE)]
+    if signature != _SIGNATURE:
+        raise ValueError(
+            f"Not a Portfolio Performance protobuf file "
+            f"(expected signature {_SIGNATURE!r}, got {signature!r})"
+        )
+
+    client = PClient()
+    client.ParseFromString(raw[len(_SIGNATURE) :])
+    return client
+
+
+def _compute_shares(client) -> dict[str, int]:
+    """Calculate shares held per security from the transaction history."""
+    sec_shares: dict[str, int] = {}
+    for t in client.transactions:
+        if not t.HasField("security"):
+            continue
+        sid = t.security
+        shares = t.shares if t.HasField("shares") else 0
+        if t.type in (0, 2):  # PURCHASE, INBOUND_DELIVERY
+            sec_shares[sid] = sec_shares.get(sid, 0) + shares
+        elif t.type in (1, 3):  # SALE, OUTBOUND_DELIVERY
+            sec_shares[sid] = sec_shares.get(sid, 0) - shares
+    return sec_shares
+
+
+def _resolve_currency_factors(
+    base_currency: str,
+    assigned_currencies: set[str],
+) -> dict[str, float]:
+    """Build a mapping from each currency to its conversion factor to the base currency."""
+    factors: dict[str, float] = {base_currency: 1.0}
+    for currency in assigned_currencies:
+        fixed = _FIXED_CURRENCY_FACTORS.get(currency, {})
+        if base_currency in fixed:
+            factors[currency] = fixed[base_currency]
+
+    need_fetch = assigned_currencies - set(factors)
+    if need_fetch:
+        factors.update(_fetch_exchange_rates(base_currency, need_fetch))
+
+    return factors
 
 
 class OptimizationResult(NamedTuple):
     """Result of the portfolio allocation optimization."""
 
-    best_combination: Tuple[int, ...]
+    best_combination: tuple[int, ...]
     best_allocations: np.ndarray
     min_sse: float
 
@@ -24,10 +111,9 @@ class OptimizationResult(NamedTuple):
 class Portfolio:
     """Manages portfolio data and optimization operations."""
 
-    allocations: Dict[str, float]
-    allocation_targets: Dict[str, float]
-    category_totals: Dict[str, float]
-    investment_names: List[str] = field(init=False)
+    allocations: dict[str, float]
+    allocation_targets: dict[str, float]
+    investment_names: list[str] = field(init=False)
 
     def __post_init__(self):
         """Initialize derived attributes."""
@@ -41,61 +127,109 @@ class Portfolio:
     @property
     def target_weights(self) -> np.ndarray:
         """Get target weights as a numpy array."""
-
         return np.array(list(self.allocation_targets.values())) / 100.0
 
     @classmethod
-    def from_csv(cls, filepath: Path) -> "Portfolio":
-        """Parse asset allocation CSV and return a Portfolio instance."""
-        filepath = Path(filepath)
-        current_category = ""
-        category_totals = {}
+    def from_portfolio_file(
+        cls,
+        filepath: Path,
+        taxonomy_name: str = "Asset Allocation",
+    ) -> "Portfolio":
+        """Parse a Portfolio Performance .portfolio file and return a Portfolio instance.
+
+        Args:
+            filepath: Path to the .portfolio file (zip containing protobuf data).
+            taxonomy_name: Name of the taxonomy to use for allocation targets.
+        """
+        client = _read_client(Path(filepath))
+
+        base_currency = client.baseCurrency or "GBP"
+        sec_map = {s.uuid: s for s in client.securities}
+        sec_shares = _compute_shares(client)
+
+        # Find the target taxonomy
+        taxonomy = None
+        for tax in client.taxonomies:
+            if tax.name == taxonomy_name:
+                taxonomy = tax
+                break
+        if taxonomy is None:
+            available = [t.name for t in client.taxonomies]
+            raise ValueError(
+                f"Taxonomy '{taxonomy_name}' not found. Available: {available}"
+            )
+
+        # Build classification tree
+        classifications = {c.id: c for c in taxonomy.classifications}
+
+        # Find root (no parentId)
+        root = None
+        for c in taxonomy.classifications:
+            if not c.HasField("parentId"):
+                root = c
+                break
+
+        # Build children map
+        children: dict[str, list[str]] = {}
+        for c in taxonomy.classifications:
+            if c.HasField("parentId"):
+                children.setdefault(c.parentId, []).append(c.id)
+
+        # Top-level categories are children of root (e.g. Equity, Bonds)
+        top_level_ids = children.get(root.id, [])
+
+        # Resolve currency conversion factors
+        assigned_currencies: set[str] = set()
+        for c in taxonomy.classifications:
+            for a in c.assignments:
+                sec = sec_map.get(a.investmentVehicle)
+                if sec:
+                    assigned_currencies.add(sec.currencyCode)
+        currency_factors = _resolve_currency_factors(base_currency, assigned_currencies)
+
+        def _security_value_base(uuid: str) -> float:
+            """Calculate the current value of a security in base currency."""
+            sec = sec_map.get(uuid)
+            if sec is None or not sec.prices:
+                return 0.0
+            shares = sec_shares.get(uuid, 0) / _SHARE_PRECISION
+            price = sec.prices[-1].close / _PRICE_PRECISION
+            return shares * price * currency_factors[sec.currencyCode]
+
+        # Process sub-categories (children of top-level categories)
         allocations = {}
         allocation_targets = {}
 
-        def parse_currency(value_str: str) -> float:
-            """Parse currency string by removing commas and converting to float."""
-            return float(value_str.replace(",", ""))
+        for cat_id in top_level_ids:
+            cat = classifications[cat_id]
+            cat_weight = cat.weight / 10000.0  # as fraction
+            sub_ids = children.get(cat_id, [])
 
-        with filepath.open("r", encoding="utf-8") as csvfile:
-            reader = csv.reader(csvfile, delimiter=",", quotechar='"')
+            for sub_id in sub_ids:
+                sub = classifications[sub_id]
 
-            for row_id, row in enumerate(reader):
-                # Skip header row
-                if row_id == 0:
-                    continue
-                # Skip total row (row 1, index 1)
-                elif row_id == 1:
-                    continue
+                # Sum values of all securities assigned to this sub-category
+                total_value = sum(
+                    _security_value_base(a.investmentVehicle) for a in sub.assignments
+                )
+                allocations[sub.name] = total_value
 
-                category = row[1]
-                # Process category headers (Equity, Bonds)
-                if category in ["Equity", "Bonds"] and category != current_category:
-                    current_category = category
-                    category_totals[current_category] = float(row[5])
-                    continue
-
-                # Process allocation rows within current category
-                if category == current_category and row[4] == "":
-                    asset_name = row[2]
-                    allocations[asset_name] = parse_currency(row[10])
-
-                    # Calculate target allocation
-                    target_percentage = parse_currency(row[5])
-                    category_weight = category_totals[category] / 100
-                    allocation_targets[asset_name] = target_percentage * category_weight
+                # Target = sub_weight * category_weight (both as fractions of parent)
+                sub_weight_pct = (
+                    sub.weight / 100.0
+                )  # sub weight as percentage of category
+                allocation_targets[sub.name] = sub_weight_pct * cat_weight
 
         return cls(
             allocations=allocations,
             allocation_targets=allocation_targets,
-            category_totals=category_totals,
         )
 
     def optimize(
         self,
         additional_investment: float,
         n_assets: int = 2,
-        excluded_assets: Optional[List[str]] = None,
+        excluded_assets: list[str] | None = None,
     ) -> OptimizationResult:
         """
         Find optimal allocation for additional funds using parallel processing.
@@ -121,18 +255,15 @@ class Portfolio:
         if not eligible_indices:
             raise ValueError("No eligible assets available for optimization.")
 
-        num_eligible = len(eligible_indices)
-        if n_assets is None or n_assets > num_eligible:
-            n_assets = num_eligible
-
-        investment_indices = eligible_indices
+        if n_assets is None or n_assets > len(eligible_indices):
+            n_assets = len(eligible_indices)
 
         min_overall_sse = float("inf")
         best_combination = None
         best_allocations = None
 
         # Prepare arguments for parallel execution
-        combinations = list(itertools.combinations(investment_indices, n_assets))
+        combinations = list(itertools.combinations(eligible_indices, n_assets))
 
         # Helper function arguments
         func = partial(
@@ -164,12 +295,12 @@ class Portfolio:
     @classmethod
     def _optimize_combination(
         cls,
-        combination: Tuple[int, ...],
+        combination: tuple[int, ...],
         additional_investment: float,
         current_vals: np.ndarray,
         targets: np.ndarray,
         n_assets: int,
-    ) -> Tuple[Tuple[int, ...], float, np.ndarray]:
+    ) -> tuple[tuple[int, ...], float, np.ndarray]:
         """Helper method to optimize a single combination (static for pickling)."""
 
         # Constraint: Sum of allocations must equal additional_investment
@@ -211,7 +342,7 @@ class Portfolio:
     def _calculate_sse(
         cls,
         allocations: np.ndarray,
-        model_indices: Tuple[int, ...],
+        model_indices: tuple[int, ...],
         current_vals: np.ndarray,
         target_weights: np.ndarray,
     ) -> float:
@@ -225,7 +356,7 @@ class Portfolio:
     @staticmethod
     def _calculate_jacobian(
         allocations: np.ndarray,
-        model_indices: Tuple[int, ...],
+        model_indices: tuple[int, ...],
         current_vals: np.ndarray,
         target_weights: np.ndarray,
     ) -> np.ndarray:
@@ -247,7 +378,7 @@ class Portfolio:
     @staticmethod
     def _calculate_hessian(
         allocations: np.ndarray,
-        model_indices: Tuple[int, ...],
+        model_indices: tuple[int, ...],
         current_vals: np.ndarray,
         target_weights: np.ndarray,
     ) -> np.ndarray:
@@ -276,8 +407,9 @@ class Portfolio:
             percent = (amount / additional_investment) * 100
             print(f"Optimal allocation: £{amount:,.2f} to '{name}' ({percent:.2f}%)")
 
-        print("\n")
-        print(f"SSE: {optimization_result.min_sse:.2e}\n")
+        print()
+        print(f"SSE: {optimization_result.min_sse:.2e}")
+        print()
 
         # Portfolio Weights Table
         final_values = self.current_values.copy()
@@ -312,7 +444,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calculate optimal asset allocation.")
     parser.add_argument(
         "filepath",
-        help="Path to the asset allocation CSV file",
+        help="Path to the .portfolio file",
     )
     parser.add_argument(
         "additional_investment",
@@ -333,27 +465,29 @@ def parse_arguments() -> argparse.Namespace:
         default=[],
         help="List of asset names to exclude from optimization",
     )
+    parser.add_argument(
+        "--taxonomy",
+        "-t",
+        default="Asset Allocation",
+        help="Taxonomy name to use from .portfolio file (default: 'Asset Allocation')",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_arguments()
 
-    try:
-        portfolio = Portfolio.from_csv(args.filepath)
-        result = portfolio.optimize(
-            additional_investment=args.additional_investment,
-            n_assets=args.n_assets,
-            excluded_assets=args.exclude,
-        )
-        portfolio.print_summary(result, args.additional_investment)
+    portfolio = Portfolio.from_portfolio_file(
+        args.filepath,
+        taxonomy_name=args.taxonomy,
+    )
 
-    except FileNotFoundError:
-        print(f"Error: Could not find file at {args.filepath}")
-        exit(1)
-    except Exception as e:
-        print(f"Error processing portfolio: {e}")
-        exit(1)
+    result = portfolio.optimize(
+        additional_investment=args.additional_investment,
+        n_assets=args.n_assets,
+        excluded_assets=args.exclude,
+    )
+    portfolio.print_summary(result, args.additional_investment)
 
 
 if __name__ == "__main__":
