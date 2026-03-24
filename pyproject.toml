@@ -12,3 +12,8 @@ dependencies = [
 
 [tool.ruff]
 extend-exclude = ["proto/"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
