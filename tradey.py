@@ -5,11 +5,12 @@ import multiprocessing
 from functools import partial
 import itertools
 import json
+from http.client import HTTPResponse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import numpy as np
 
@@ -42,14 +43,15 @@ def _fetch_exchange_rates(base_currency: str, currencies: set[str]) -> dict[str,
         f"https://api.frankfurter.dev/v1/latest?base={base_currency}&symbols={symbols}"
     )
     req = urllib.request.Request(url, headers={"User-Agent": "tradey/1.0"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
+    resp = cast(HTTPResponse, urllib.request.urlopen(req, timeout=10))
+    data = cast(dict[str, dict[str, float]], json.loads(resp.read()))
+    resp.close()
 
     # API returns rates as base→foreign, we need foreign→base (i.e. 1/rate)
     return {currency: 1.0 / rate for currency, rate in data["rates"].items()}
 
 
-def _read_client(filepath: Path):
+def _read_client(filepath: Path) -> PClient:
     """Read and parse a Portfolio Performance .portfolio file."""
     with zipfile.ZipFile(filepath, "r") as zf:
         raw = zf.read("data.portfolio")
@@ -57,16 +59,15 @@ def _read_client(filepath: Path):
     signature = raw[: len(_SIGNATURE)]
     if signature != _SIGNATURE:
         raise ValueError(
-            f"Not a Portfolio Performance protobuf file "
-            f"(expected signature {_SIGNATURE!r}, got {signature!r})"
+            f"Not a Portfolio Performance protobuf file (expected signature {_SIGNATURE!r}, got {signature!r})"
         )
 
     client = PClient()
-    client.ParseFromString(raw[len(_SIGNATURE) :])
+    _ = client.ParseFromString(raw[len(_SIGNATURE) :])
     return client
 
 
-def _compute_shares(client) -> dict[str, int]:
+def _compute_shares(client: PClient) -> dict[str, int]:
     """Calculate shares held per security from the transaction history."""
     sec_shares: dict[str, int] = {}
     for t in client.transactions:
@@ -143,7 +144,7 @@ class Portfolio:
         """
         client = _read_client(Path(filepath))
 
-        base_currency = client.baseCurrency or "GBP"
+        base_currency: str = client.baseCurrency or "GBP"
         sec_map = {s.uuid: s for s in client.securities}
         sec_shares = _compute_shares(client)
 
@@ -175,6 +176,9 @@ class Portfolio:
             if c.HasField("parentId"):
                 children.setdefault(c.parentId, []).append(c.id)
 
+        if root is None:
+            raise ValueError("Taxonomy has no root classification (missing parentId)")
+
         # Top-level categories are children of root (e.g. Equity, Bonds)
         top_level_ids = children.get(root.id, [])
 
@@ -197,8 +201,8 @@ class Portfolio:
             return shares * price * currency_factors[sec.currencyCode]
 
         # Process sub-categories (children of top-level categories)
-        allocations = {}
-        allocation_targets = {}
+        allocations: dict[str, float] = {}
+        allocation_targets: dict[str, float] = {}
 
         for cat_id in top_level_ids:
             cat = classifications[cat_id]
@@ -255,7 +259,7 @@ class Portfolio:
         if not eligible_indices:
             raise ValueError("No eligible assets available for optimization.")
 
-        if n_assets is None or n_assets > len(eligible_indices):
+        if n_assets > len(eligible_indices):
             n_assets = len(eligible_indices)
 
         min_overall_sse = float("inf")
@@ -286,8 +290,10 @@ class Portfolio:
                 best_combination = combination
                 best_allocations = result_x
 
+        assert best_combination is not None and best_allocations is not None
+
         return OptimizationResult(
-            best_combination=best_combination,  # type: ignore
+            best_combination=best_combination,
             best_allocations=best_allocations,
             min_sse=min_overall_sse,
         )
@@ -307,11 +313,11 @@ class Portfolio:
         # We assume n_assets matches len(combination)
         constraint_matrix = np.ones((1, n_assets))
         linear_constraint = LinearConstraint(
-            constraint_matrix, [additional_investment], [additional_investment]
+            constraint_matrix, additional_investment, additional_investment
         )
 
         # Bounds: Non-negative allocations
-        bounds = Bounds(np.zeros(n_assets), np.full(n_assets, additional_investment))
+        bounds = Bounds(lb=0.0, ub=additional_investment)
 
         # Initial guess: Even distribution
         initial_guess = [additional_investment / n_assets] * n_assets
@@ -327,15 +333,15 @@ class Portfolio:
             hess=cls._calculate_hessian,
         )
 
-        return combination, result.fun, result.x
+        return combination, float(result.fun), result.x
 
     @staticmethod
     def _calculate_allocation_deviation(
         values: np.ndarray, target_weights: np.ndarray
     ) -> np.ndarray:
-        total = np.sum(values)
+        total = cast(float, np.sum(values))
         # Avoid division by zero if target is 0 (though users should avoid 0 targets)
-        deviation = (values / (target_weights * total)) - 1
+        deviation: np.ndarray = (values / (target_weights * total)) - 1
         return deviation
 
     @classmethod
@@ -351,7 +357,7 @@ class Portfolio:
         new_values[indices] += allocations
 
         new_weights = cls._calculate_allocation_deviation(new_values, target_weights)
-        return np.sum(new_weights**2)
+        return cast(float, np.sum(new_weights**2))
 
     @staticmethod
     def _calculate_jacobian(
@@ -360,7 +366,9 @@ class Portfolio:
         current_vals: np.ndarray,
         target_weights: np.ndarray,
     ) -> np.ndarray:
-        total_value = np.sum(current_vals) + np.sum(allocations)
+        total_value = cast(float, np.sum(current_vals)) + cast(
+            float, np.sum(allocations)
+        )
         indices = np.array(model_indices, dtype=int)
 
         active_current = current_vals[indices]
@@ -369,10 +377,10 @@ class Portfolio:
 
         active_final_values = active_current + allocations
 
-        denom = active_targets * total_value
-        weights = (active_final_values / denom) - 1
+        denom: np.ndarray = active_targets * total_value
+        weights: np.ndarray = (active_final_values / denom) - 1
 
-        grad = 2 * weights * (1 / denom)
+        grad: np.ndarray = 2 * weights * (1 / denom)
         return grad
 
     @staticmethod
@@ -382,12 +390,14 @@ class Portfolio:
         current_vals: np.ndarray,
         target_weights: np.ndarray,
     ) -> np.ndarray:
-        total_value = np.sum(current_vals) + np.sum(allocations)
+        total_value = cast(float, np.sum(current_vals)) + cast(
+            float, np.sum(allocations)
+        )
         indices = np.array(model_indices, dtype=int)
         active_targets = target_weights[indices]
 
-        denom = active_targets * total_value
-        diag_values = 2 * (1 / denom) ** 2
+        denom: np.ndarray = active_targets * total_value
+        diag_values: np.ndarray = 2 * (1 / denom) ** 2
 
         return np.diag(diag_values)
 
@@ -402,10 +412,12 @@ class Portfolio:
         param_names = [self.investment_names[i] for i in best_combination]
         print(f"Invest in: {param_names}")
 
-        for idx, amount in zip(best_combination, best_allocations):
+        for idx, amount_f in zip(
+            best_combination, cast(list[float], best_allocations.tolist())
+        ):
             name = self.investment_names[idx]
-            percent = (amount / additional_investment) * 100
-            print(f"Optimal allocation: £{amount:,.2f} to '{name}' ({percent:.2f}%)")
+            percent = (amount_f / additional_investment) * 100
+            print(f"Optimal allocation: £{amount_f:,.2f} to '{name}' ({percent:.2f}%)")
 
         print()
         print(f"SSE: {optimization_result.min_sse:.2e}")
@@ -442,30 +454,30 @@ class Portfolio:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calculate optimal asset allocation.")
-    parser.add_argument(
+    _ = parser.add_argument(
         "filepath",
         help="Path to the .portfolio file",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "additional_investment",
         type=float,
         help="Amount of additional cash to invest",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--n-assets",
         "-n",
         type=int,
         default=2,
         help="Number of assets to distribute investment across (default: 2)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--exclude",
         "-x",
         nargs="+",
         default=[],
         help="List of asset names to exclude from optimization",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--taxonomy",
         "-t",
         default="Asset Allocation",
@@ -477,17 +489,23 @@ def parse_arguments() -> argparse.Namespace:
 def main():
     args = parse_arguments()
 
+    filepath = cast(str, args.filepath)
+    taxonomy = cast(str, args.taxonomy)
+    additional_investment = cast(float, args.additional_investment)
+    n_assets = cast(int, args.n_assets)
+    exclude = cast(list[str], args.exclude)
+
     portfolio = Portfolio.from_portfolio_file(
-        args.filepath,
-        taxonomy_name=args.taxonomy,
+        Path(filepath),
+        taxonomy_name=taxonomy,
     )
 
     result = portfolio.optimize(
-        additional_investment=args.additional_investment,
-        n_assets=args.n_assets,
-        excluded_assets=args.exclude,
+        additional_investment=additional_investment,
+        n_assets=n_assets,
+        excluded_assets=exclude,
     )
-    portfolio.print_summary(result, args.additional_investment)
+    portfolio.print_summary(result, additional_investment)
 
 
 if __name__ == "__main__":

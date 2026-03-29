@@ -16,4 +16,5 @@ extend-exclude = ["proto/"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "scipy-stubs>=1.17.1.3",
 ]
