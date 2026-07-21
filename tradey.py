@@ -249,7 +249,8 @@ class Portfolio:
             if sec is None or not sec.prices:
                 return 0.0
             shares = sec_shares.get(uuid, 0) / _SHARE_PRECISION
-            price = sec.prices[-1].close / _PRICE_PRECISION
+            latest_price = max(sec.prices, key=lambda p: p.date)
+            price = latest_price.close / _PRICE_PRECISION
             return shares * price * currency_factors[sec.currencyCode]
 
         # Process sub-categories (children of top-level categories)
