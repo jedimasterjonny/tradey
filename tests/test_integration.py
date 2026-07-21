@@ -427,3 +427,20 @@ class TestCurrencyCoverage:
             pytest.raises(ValueError, match="USD"),
         ):
             Portfolio.from_portfolio_file(filepath)
+
+
+class TestLatestPriceByDate:
+    """Fix #6: valuation uses the price with the maximum date, not the last."""
+
+    def test_uses_max_date_not_last_element(self, tmp_path):
+        """Prices are supplied out of date order: the last element is an older,
+        higher quote. Valuation must use the latest-by-date price.
+
+        Old code takes prices[-1] (£99) → £59,400; new code takes the max-date
+        price (£10) → £6,000 (RED on old code)."""
+        filepath = _make_synthetic_portfolio_file(
+            tmp_path,
+            sec_a_prices=((20000, 10), (10000, 99)),  # latest date first
+        )
+        portfolio = Portfolio.from_portfolio_file(filepath)
+        assert portfolio.allocations["Global Equity"] == pytest.approx(6000.0)
