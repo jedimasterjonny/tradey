@@ -3,6 +3,7 @@ import itertools
 import json
 import math
 import multiprocessing
+import sys
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -255,6 +256,20 @@ class Portfolio:
             raise ValueError(
                 "portfolio has no value (total holdings are zero); nothing to rebalance"
             )
+
+        # Fix #3: normalize target weights so they sum to 1.0. Real taxonomies
+        # often do not sum to 100% (unclassified cash, partial weights), which
+        # would bias every deviation. allocation_targets are stored as
+        # percentages (summing to 100 when complete).
+        raw_sum = sum(allocation_targets.values()) / 100.0  # as a fraction
+        if abs(raw_sum - 1.0) > 0.01:
+            print(
+                f"warning: taxonomy target weights sum to {raw_sum:.2%} "
+                "(expected 100%); rescaling targets to sum to 1.0",
+                file=sys.stderr,
+            )
+        for name in allocation_targets:
+            allocation_targets[name] /= raw_sum
 
         return cls(
             allocations=allocations,

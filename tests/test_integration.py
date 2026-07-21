@@ -367,3 +367,39 @@ class TestZeroTargetAndEmptyPortfolio:
         )
         with pytest.raises(ValueError, match=r"(?i)no value|empty"):
             Portfolio.from_portfolio_file(filepath)
+
+
+class TestTargetNormalization:
+    """Fix #3: target weights are renormalized to sum to 1.0."""
+
+    def test_targets_below_100_are_rescaled(self, tmp_path, capsys):
+        """A taxonomy summing to 80% is rescaled so a proportionally-correct
+        portfolio reports ~zero deviation, and a warning is emitted.
+
+        Old code leaves the raw 48%/32% targets, so the proportional 60/40
+        portfolio shows a uniform +25% deviation (RED)."""
+        # Equity 48% + Bonds 32% = 80% total; holdings 6000/4000 = 60/40.
+        filepath = _make_synthetic_portfolio_file(
+            tmp_path, equity_weight=4800, bonds_weight=3200
+        )
+        portfolio = Portfolio.from_portfolio_file(filepath)
+
+        deviation = Portfolio._calculate_allocation_deviation(
+            portfolio.current_values, portfolio.target_weights
+        )
+        np.testing.assert_allclose(deviation, 0.0, atol=1e-9)
+
+        # Normalized targets now sum to 1.0.
+        assert np.sum(portfolio.target_weights) == pytest.approx(1.0)
+
+        err = capsys.readouterr().err
+        assert "rescal" in err.lower() or "sum" in err.lower()
+
+    def test_targets_summing_to_100_no_warning(self, tmp_path, capsys):
+        """A taxonomy summing to exactly 100% is unchanged and warns nothing."""
+        filepath = _make_synthetic_portfolio_file(tmp_path)  # 60/40 defaults
+        portfolio = Portfolio.from_portfolio_file(filepath)
+
+        assert portfolio.allocation_targets["Global Equity"] == pytest.approx(60.0)
+        assert portfolio.allocation_targets["Global Bonds"] == pytest.approx(40.0)
+        assert capsys.readouterr().err == ""
