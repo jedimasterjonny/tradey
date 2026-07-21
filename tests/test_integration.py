@@ -14,10 +14,23 @@ _SHARE_INT = int(1e8)
 _PRICE_INT = int(1e8)
 
 
-def _make_synthetic_portfolio_file(tmp_path):
+def _make_synthetic_portfolio_file(
+    tmp_path,
+    *,
+    equity_weight=6000,
+    bonds_weight=4000,
+    global_eq_sub_weight=10000,
+    global_bonds_sub_weight=10000,
+    sec_a_currency="GBP",
+    sec_b_currency="GBP",
+    sec_a_prices=((20000, 10),),
+    sec_b_prices=((20000, 5),),
+    sec_a_shares=600,
+    sec_b_shares=800,
+):
     """Build a minimal synthetic .portfolio file with 2 securities and a taxonomy.
 
-    Taxonomy structure:
+    Taxonomy structure (defaults):
         Asset Allocation (root)
         ├── Equity (weight=6000 → 60%)
         │   └── Global Equity (weight=100% of Equity)
@@ -25,6 +38,10 @@ def _make_synthetic_portfolio_file(tmp_path):
         └── Bonds (weight=4000 → 40%)
             └── Global Bonds (weight=100% of Bonds)
                 └── Fund B (sec-b)
+
+    Prices are given as ``(date, close_in_pounds)`` tuples; the order in which
+    they are supplied is preserved in the serialized file so callers can build
+    deliberately out-of-order price series.
     """
     client = PClient()
     client.baseCurrency = "GBP"
@@ -33,31 +50,33 @@ def _make_synthetic_portfolio_file(tmp_path):
     sec_a = client.securities.add()
     sec_a.uuid = "sec-a"
     sec_a.name = "Fund A"
-    sec_a.currencyCode = "GBP"
-    price_a = sec_a.prices.add()
-    price_a.date = 20000
-    price_a.close = 10 * _PRICE_INT  # £10 per share
+    sec_a.currencyCode = sec_a_currency
+    for date, close_pounds in sec_a_prices:
+        price_a = sec_a.prices.add()
+        price_a.date = date
+        price_a.close = int(close_pounds * _PRICE_INT)
 
     sec_b = client.securities.add()
     sec_b.uuid = "sec-b"
     sec_b.name = "Fund B"
-    sec_b.currencyCode = "GBP"
-    price_b = sec_b.prices.add()
-    price_b.date = 20000
-    price_b.close = 5 * _PRICE_INT  # £5 per share
+    sec_b.currencyCode = sec_b_currency
+    for date, close_pounds in sec_b_prices:
+        price_b = sec_b.prices.add()
+        price_b.date = date
+        price_b.close = int(close_pounds * _PRICE_INT)
 
-    # Transactions: buy 600 shares of A, 800 shares of B
+    # Transactions
     tx_a = client.transactions.add()
     tx_a.uuid = "tx-a"
     tx_a.type = 0  # PURCHASE
     tx_a.security = "sec-a"
-    tx_a.shares = 600 * _SHARE_INT  # 600 shares x £10 = £6000
+    tx_a.shares = sec_a_shares * _SHARE_INT
 
     tx_b = client.transactions.add()
     tx_b.uuid = "tx-b"
     tx_b.type = 0
     tx_b.security = "sec-b"
-    tx_b.shares = 800 * _SHARE_INT  # 800 shares x £5 = £4000
+    tx_b.shares = sec_b_shares * _SHARE_INT
 
     # Taxonomy
     tax = client.taxonomies.add()
@@ -75,14 +94,14 @@ def _make_synthetic_portfolio_file(tmp_path):
     equity.id = "equity"
     equity.parentId = "root"
     equity.name = "Equity"
-    equity.weight = 6000  # 60%
+    equity.weight = equity_weight
 
     # Global Equity sub-category
     global_eq = tax.classifications.add()
     global_eq.id = "global-eq"
     global_eq.parentId = "equity"
     global_eq.name = "Global Equity"
-    global_eq.weight = 10000  # 100% of Equity
+    global_eq.weight = global_eq_sub_weight
     assign_a = global_eq.assignments.add()
     assign_a.investmentVehicle = "sec-a"
     assign_a.weight = 10000
@@ -92,14 +111,14 @@ def _make_synthetic_portfolio_file(tmp_path):
     bonds.id = "bonds"
     bonds.parentId = "root"
     bonds.name = "Bonds"
-    bonds.weight = 4000  # 40%
+    bonds.weight = bonds_weight
 
     # Global Bonds sub-category
     global_bonds = tax.classifications.add()
     global_bonds.id = "global-bonds"
     global_bonds.parentId = "bonds"
     global_bonds.name = "Global Bonds"
-    global_bonds.weight = 10000  # 100% of Bonds
+    global_bonds.weight = global_bonds_sub_weight
     assign_b = global_bonds.assignments.add()
     assign_b.investmentVehicle = "sec-b"
     assign_b.weight = 10000
