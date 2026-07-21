@@ -2,6 +2,7 @@
 
 import io
 import zipfile
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -244,3 +245,104 @@ class TestPortfolioOptimize:
         result = portfolio.optimize(200.0, n_assets=1)
         assert len(result.best_allocations) == 1
         assert result.best_allocations[0] == pytest.approx(200.0)
+
+
+class _SerialPool:
+    """Drop-in replacement for multiprocessing.Pool that maps in-process.
+
+    Running the optimization in the main process lets a monkeypatched
+    ``tradey.minimize`` take effect (a real Pool spawns fresh subprocesses).
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def map(self, func, iterable):
+        return [func(item) for item in iterable]
+
+
+class _FakeMinimizeResult:
+    def __init__(self, x, fun, success):
+        self.x = np.asarray(x, dtype=float)
+        self.fun = fun
+        self.success = success
+
+
+class TestOptimizeConvergence:
+    """Fix #1: scipy convergence is checked; degenerate winners are rejected."""
+
+    @pytest.fixture
+    def balanced_portfolio(self):
+        return Portfolio(
+            allocations={"Equities": 6000.0, "Bonds": 3000.0, "Cash": 1000.0},
+            allocation_targets={"Equities": 60.0, "Bonds": 30.0, "Cash": 10.0},
+        )
+
+    def test_no_combination_converges_raises(self, balanced_portfolio):
+        """If every combination reports success=False, raise a clear ValueError.
+
+        Old code ignores ``result.success`` and returns a bogus result, so this
+        would NOT raise (RED).
+        """
+
+        def fake_minimize(*args, **kwargs):
+            n = len(kwargs["x0"])
+            return _FakeMinimizeResult([1000.0 / n] * n, 1.0, False)
+
+        with (
+            patch("tradey.multiprocessing.Pool", _SerialPool),
+            patch("tradey.minimize", side_effect=fake_minimize),
+            pytest.raises(ValueError, match="converge"),
+        ):
+            balanced_portfolio.optimize(1000.0, n_assets=2)
+
+    def test_winner_failing_sum_check_raises(self, balanced_portfolio):
+        """A converged winner whose allocations do not sum to the investment
+        is rejected. Old code returns it silently (RED)."""
+
+        def fake_minimize(*args, **kwargs):
+            n = len(kwargs["x0"])
+            return _FakeMinimizeResult([0.0] * n, 0.0, True)
+
+        with (
+            patch("tradey.multiprocessing.Pool", _SerialPool),
+            patch("tradey.minimize", side_effect=fake_minimize),
+            pytest.raises(ValueError, match="sum"),
+        ):
+            balanced_portfolio.optimize(1000.0, n_assets=2)
+
+    def test_winner_with_negative_allocation_raises(self, balanced_portfolio):
+        """A converged winner with a materially negative amount is rejected.
+        Old code returns it silently (RED)."""
+
+        def fake_minimize(*args, **kwargs):
+            # Sums to the investment but has a large negative element.
+            return _FakeMinimizeResult([1500.0, -500.0], 0.0, True)
+
+        with (
+            patch("tradey.multiprocessing.Pool", _SerialPool),
+            patch("tradey.minimize", side_effect=fake_minimize),
+            pytest.raises(ValueError, match="negative"),
+        ):
+            balanced_portfolio.optimize(1000.0, n_assets=2)
+
+    def test_tiny_negative_is_clipped(self, balanced_portfolio):
+        """A converged winner with a negligible negative (within -1e-9) is
+        clipped to zero rather than rejected."""
+
+        def fake_minimize(*args, **kwargs):
+            return _FakeMinimizeResult([1000.0 + 1e-12, -1e-12], 0.0, True)
+
+        with (
+            patch("tradey.multiprocessing.Pool", _SerialPool),
+            patch("tradey.minimize", side_effect=fake_minimize),
+        ):
+            result = balanced_portfolio.optimize(1000.0, n_assets=2)
+        assert all(a >= 0.0 for a in result.best_allocations)
+        assert np.sum(result.best_allocations) == pytest.approx(1000.0)
