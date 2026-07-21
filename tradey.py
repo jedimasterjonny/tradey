@@ -1,6 +1,7 @@
 import argparse
 import itertools
 import json
+import math
 import multiprocessing
 import urllib.request
 import zipfile
@@ -294,14 +295,40 @@ class Portfolio:
         with multiprocessing.Pool() as pool:
             results = pool.map(func, combinations)
 
-        # Find best result
-        for combination, result_fun, result_x in results:
+        # Find best result, considering only combinations that converged.
+        # Non-converged results may carry an `x` that violates the budget or
+        # non-negativity constraints, so they must never be treated as valid.
+        for combination, result_fun, result_x, success in results:
+            if not success:
+                continue
             if result_fun < min_overall_sse:
                 min_overall_sse = result_fun
                 best_combination = combination
                 best_allocations = result_x
 
-        assert best_combination is not None and best_allocations is not None
+        if best_combination is None or best_allocations is None:
+            raise ValueError(
+                "optimization failed: no asset combination converged to a valid "
+                "allocation"
+            )
+
+        # Post-validate the winning allocation before trusting it.
+        best_allocations = np.asarray(best_allocations, dtype=float)
+        alloc_sum = float(np.sum(best_allocations))
+        if not math.isclose(
+            alloc_sum, additional_investment, rel_tol=1e-6, abs_tol=1e-9
+        ):
+            raise ValueError(
+                "optimization produced an invalid allocation: amounts sum to "
+                f"{alloc_sum:.2f}, expected {additional_investment:.2f}"
+            )
+        if np.any(best_allocations < -1e-9):
+            raise ValueError(
+                "optimization produced an invalid allocation: a negative amount "
+                f"was suggested ({best_allocations.tolist()})"
+            )
+        # Clip negligible negatives (within tolerance) to exactly zero.
+        best_allocations = np.where(best_allocations < 0.0, 0.0, best_allocations)
 
         return OptimizationResult(
             best_combination=best_combination,
@@ -317,7 +344,7 @@ class Portfolio:
         current_vals: np.ndarray,
         targets: np.ndarray,
         n_assets: int,
-    ) -> tuple[tuple[int, ...], float, np.ndarray]:
+    ) -> tuple[tuple[int, ...], float, np.ndarray, bool]:
         """Helper method to optimize a single combination (static for pickling)."""
 
         # Constraint: Sum of allocations must equal additional_investment
@@ -344,7 +371,7 @@ class Portfolio:
             hess=cls._calculate_hessian,
         )
 
-        return combination, float(result.fun), result.x
+        return combination, float(result.fun), result.x, bool(result.success)
 
     @staticmethod
     def _calculate_allocation_deviation(
