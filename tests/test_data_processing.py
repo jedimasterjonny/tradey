@@ -9,14 +9,11 @@ from urllib.error import URLError
 import pytest
 
 from proto.client_pb2 import PClient, PTransaction
-from tradey import (
-    _SHARE_PRECISION,
-    _SIGNATURE,
-    _compute_shares,
-    _fetch_exchange_rates,
-    _read_client,
-    _resolve_currency_factors,
-)
+from tradey.fx import fetch_exchange_rates as _fetch_exchange_rates
+from tradey.fx import resolve_currency_factors as _resolve_currency_factors
+from tradey.loader import _SHARE_PRECISION, _SIGNATURE
+from tradey.loader import compute_shares as _compute_shares
+from tradey.loader import load_client as _read_client
 
 SHARES = int(_SHARE_PRECISION)
 
@@ -91,7 +88,7 @@ class TestResolveCurrencyFactors:
     def test_fetches_unknown_currency(self):
         """Unknown currencies should trigger an API fetch."""
         mock_rates = {"USD": 0.8}
-        with patch("tradey._fetch_exchange_rates", return_value=mock_rates) as mock:
+        with patch("tradey.fx.fetch_exchange_rates", return_value=mock_rates) as mock:
             factors = _resolve_currency_factors("GBP", {"USD"})
             mock.assert_called_once_with("GBP", {"USD"})
             assert factors["USD"] == pytest.approx(0.8)
@@ -99,7 +96,7 @@ class TestResolveCurrencyFactors:
     def test_mixed_fixed_and_fetched(self):
         """GBX should use fixed rate, EUR should be fetched."""
         mock_rates = {"EUR": 1.15}
-        with patch("tradey._fetch_exchange_rates", return_value=mock_rates) as mock:
+        with patch("tradey.fx.fetch_exchange_rates", return_value=mock_rates) as mock:
             factors = _resolve_currency_factors("GBP", {"GBX", "EUR"})
             # Only EUR should be fetched, not GBX
             mock.assert_called_once_with("GBP", {"EUR"})
@@ -129,14 +126,14 @@ class TestFetchExchangeRates:
     def test_success(self):
         payload = json.dumps({"rates": {"USD": 1.25}}).encode()
         with patch(
-            "tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)
+            "tradey.fx.urllib.request.urlopen", return_value=_FakeResponse(payload)
         ):
             factors = _fetch_exchange_rates("GBP", {"USD"})
         assert factors["USD"] == pytest.approx(1.0 / 1.25)
 
     def test_no_currencies_short_circuits(self):
         """No currencies requested → no network call, empty result."""
-        with patch("tradey.urllib.request.urlopen") as mock:
+        with patch("tradey.fx.urllib.request.urlopen") as mock:
             assert _fetch_exchange_rates("GBP", set()) == {}
             mock.assert_not_called()
 
@@ -144,7 +141,7 @@ class TestFetchExchangeRates:
         """A URLError (offline/DNS/HTTP) becomes a friendly RuntimeError.
         Old code lets URLError propagate (RED)."""
         with (
-            patch("tradey.urllib.request.urlopen", side_effect=URLError("offline")),
+            patch("tradey.fx.urllib.request.urlopen", side_effect=URLError("offline")),
             pytest.raises(RuntimeError, match="could not fetch exchange rates"),
         ):
             _fetch_exchange_rates("GBP", {"USD"})
@@ -152,7 +149,8 @@ class TestFetchExchangeRates:
     def test_timeout_raises_runtimeerror(self):
         with (
             patch(
-                "tradey.urllib.request.urlopen", side_effect=TimeoutError("timed out")
+                "tradey.fx.urllib.request.urlopen",
+                side_effect=TimeoutError("timed out"),
             ),
             pytest.raises(RuntimeError, match="could not fetch exchange rates"),
         ):
@@ -163,7 +161,7 @@ class TestFetchExchangeRates:
         JSONDecodeError (RED)."""
         with (
             patch(
-                "tradey.urllib.request.urlopen",
+                "tradey.fx.urllib.request.urlopen",
                 return_value=_FakeResponse(b"not json at all"),
             ),
             pytest.raises(RuntimeError, match="could not fetch exchange rates"),
@@ -175,7 +173,9 @@ class TestFetchExchangeRates:
         raises KeyError (RED)."""
         payload = json.dumps({"base": "GBP"}).encode()
         with (
-            patch("tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)),
+            patch(
+                "tradey.fx.urllib.request.urlopen", return_value=_FakeResponse(payload)
+            ),
             pytest.raises(RuntimeError, match="rates"),
         ):
             _fetch_exchange_rates("GBP", {"USD"})
@@ -185,7 +185,9 @@ class TestFetchExchangeRates:
         ZeroDivisionError (RED)."""
         payload = json.dumps({"rates": {"USD": 0}}).encode()
         with (
-            patch("tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)),
+            patch(
+                "tradey.fx.urllib.request.urlopen", return_value=_FakeResponse(payload)
+            ),
             pytest.raises(RuntimeError, match="USD"),
         ):
             _fetch_exchange_rates("GBP", {"USD"})
@@ -193,7 +195,9 @@ class TestFetchExchangeRates:
     def test_negative_rate_raises_naming_currency(self):
         payload = json.dumps({"rates": {"USD": -1.5}}).encode()
         with (
-            patch("tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)),
+            patch(
+                "tradey.fx.urllib.request.urlopen", return_value=_FakeResponse(payload)
+            ),
             pytest.raises(RuntimeError, match="USD"),
         ):
             _fetch_exchange_rates("GBP", {"USD"})
