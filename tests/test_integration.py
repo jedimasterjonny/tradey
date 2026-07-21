@@ -346,3 +346,24 @@ class TestOptimizeConvergence:
             result = balanced_portfolio.optimize(1000.0, n_assets=2)
         assert all(a >= 0.0 for a in result.best_allocations)
         assert np.sum(result.best_allocations) == pytest.approx(1000.0)
+
+
+class TestZeroTargetAndEmptyPortfolio:
+    """Fix #2: guard zero/absent target weights and empty portfolios."""
+
+    def test_zero_weight_subcategory_raises(self, tmp_path):
+        """A sub-category with an unset (0) target weight must raise a
+        ValueError naming it. Old code produces nan and later crashes in
+        scipy (RED for the friendly ValueError)."""
+        filepath = _make_synthetic_portfolio_file(tmp_path, global_eq_sub_weight=0)
+        with pytest.raises(ValueError, match="Global Equity"):
+            Portfolio.from_portfolio_file(filepath)
+
+    def test_empty_portfolio_raises(self, tmp_path):
+        """A portfolio with no value (all holdings zero) must raise a
+        ValueError. Old code yields all-nan deviations (RED)."""
+        filepath = _make_synthetic_portfolio_file(
+            tmp_path, sec_a_shares=0, sec_b_shares=0
+        )
+        with pytest.raises(ValueError, match=r"(?i)no value|empty"):
+            Portfolio.from_portfolio_file(filepath)

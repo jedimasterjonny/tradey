@@ -236,6 +236,26 @@ class Portfolio:
                 )  # sub weight as percentage of category
                 allocation_targets[sub.name] = sub_weight_pct * cat_weight
 
+        # Fix #2: every included sub-category must have a positive target weight,
+        # otherwise the deviation calculation divides by zero and poisons the
+        # optimizer with nan/inf.
+        zero_target_names = [
+            name for name, target in allocation_targets.items() if target <= 0
+        ]
+        if zero_target_names:
+            raise ValueError(
+                "the following sub-categories have no target weight (weight must "
+                f"be greater than 0): {zero_target_names}"
+            )
+
+        # Fix #2: the portfolio must have a positive total value, otherwise every
+        # deviation is nan (division by a zero total).
+        total_value = sum(allocations.values())
+        if total_value <= 0:
+            raise ValueError(
+                "portfolio has no value (total holdings are zero); nothing to rebalance"
+            )
+
         return cls(
             allocations=allocations,
             allocation_targets=allocation_targets,
