@@ -66,3 +66,19 @@ class TestParseArguments:
     def test_missing_investment_exits(self):
         with pytest.raises(SystemExit):
             self._parse(["f.portfolio"])
+
+    def test_zero_investment_exits(self):
+        with pytest.raises(SystemExit):
+            self._parse(["f.portfolio", "0"])
+
+    def test_negative_investment_exits(self):
+        with pytest.raises(SystemExit):
+            self._parse(["f.portfolio", "-100"])
+
+    def test_zero_n_assets_exits(self):
+        with pytest.raises(SystemExit):
+            self._parse(["f.portfolio", "1000", "-n", "0"])
+
+    def test_negative_n_assets_exits(self):
+        with pytest.raises(SystemExit):
+            self._parse(["f.portfolio", "1000", "-n", "-1"])

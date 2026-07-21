@@ -452,6 +452,28 @@ class Portfolio:
         print(output)
 
 
+def _positive_float(value: str) -> float:
+    """argparse type for a strictly positive float."""
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid float value: '{value}'") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    """argparse type for an integer >= 1."""
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: '{value}'") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calculate optimal asset allocation.")
     _ = parser.add_argument(
@@ -460,13 +482,13 @@ def parse_arguments() -> argparse.Namespace:
     )
     _ = parser.add_argument(
         "additional_investment",
-        type=float,
+        type=_positive_float,
         help="Amount of additional cash to invest",
     )
     _ = parser.add_argument(
         "--n-assets",
         "-n",
-        type=int,
+        type=_positive_int,
         default=2,
         help="Number of assets to distribute investment across (default: 2)",
     )
