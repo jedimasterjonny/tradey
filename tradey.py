@@ -229,6 +229,20 @@ class Portfolio:
                     assigned_currencies.add(sec.currencyCode)
         currency_factors = _resolve_currency_factors(base_currency, assigned_currencies)
 
+        # Every assigned currency must have a resolved conversion factor,
+        # otherwise valuation would later raise a bare KeyError. A blank
+        # currencyCode is reported distinctly.
+        missing_currencies = sorted(
+            (c if c else "<blank>")
+            for c in assigned_currencies
+            if c not in currency_factors
+        )
+        if missing_currencies:
+            raise ValueError(
+                "securities priced in currencies with no exchange rate: "
+                f"{missing_currencies}"
+            )
+
         def _security_value_base(uuid: str) -> float:
             """Calculate the current value of a security in base currency."""
             sec = sec_map.get(uuid)

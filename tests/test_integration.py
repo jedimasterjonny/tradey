@@ -403,3 +403,27 @@ class TestTargetNormalization:
         assert portfolio.allocation_targets["Global Equity"] == pytest.approx(60.0)
         assert portfolio.allocation_targets["Global Bonds"] == pytest.approx(40.0)
         assert capsys.readouterr().err == ""
+
+
+class TestCurrencyCoverage:
+    """Fix #5: unresolved/blank security currencies are reported clearly."""
+
+    def test_blank_currency_reported(self, tmp_path):
+        """A security with a blank currencyCode must raise a ValueError that
+        reports it distinctly. Old code raises a bare KeyError later (RED)."""
+        filepath = _make_synthetic_portfolio_file(tmp_path, sec_a_currency="")
+        with (
+            patch("tradey._fetch_exchange_rates", return_value={}),
+            pytest.raises(ValueError, match="<blank>"),
+        ):
+            Portfolio.from_portfolio_file(filepath)
+
+    def test_unresolved_currency_reported(self, tmp_path):
+        """A currency the API does not return must raise a ValueError naming
+        it. Old code raises a bare KeyError later (RED)."""
+        filepath = _make_synthetic_portfolio_file(tmp_path, sec_a_currency="USD")
+        with (
+            patch("tradey._fetch_exchange_rates", return_value={}),
+            pytest.raises(ValueError, match="USD"),
+        ):
+            Portfolio.from_portfolio_file(filepath)
