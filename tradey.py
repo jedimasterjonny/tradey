@@ -8,9 +8,9 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from functools import partial
-from http.client import HTTPResponse
 from pathlib import Path
 from typing import NamedTuple, cast
+from urllib.error import URLError
 
 import numpy as np
 from google.protobuf.message import DecodeError
@@ -45,12 +45,37 @@ def _fetch_exchange_rates(base_currency: str, currencies: set[str]) -> dict[str,
         f"https://api.frankfurter.dev/v1/latest?base={base_currency}&symbols={symbols}"
     )
     req = urllib.request.Request(url, headers={"User-Agent": "tradey/1.0"})
-    resp = cast(HTTPResponse, urllib.request.urlopen(req, timeout=10))
-    data = cast(dict[str, dict[str, float]], json.loads(resp.read()))
-    resp.close()
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except (URLError, TimeoutError, json.JSONDecodeError) as e:
+        raise RuntimeError(
+            f"could not fetch exchange rates from frankfurter.dev: {e}"
+        ) from e
+
+    rates = data.get("rates") if isinstance(data, dict) else None
+    if not isinstance(rates, dict):
+        raise RuntimeError(
+            "could not fetch exchange rates from frankfurter.dev: "
+            "response did not contain a 'rates' object"
+        )
 
     # API returns rates as base→foreign, we need foreign→base (i.e. 1/rate)
-    return {currency: 1.0 / rate for currency, rate in data["rates"].items()}
+    factors: dict[str, float] = {}
+    for currency, rate in rates.items():
+        if isinstance(rate, bool) or not isinstance(rate, int | float):
+            raise RuntimeError(
+                f"could not fetch exchange rates from frankfurter.dev: "
+                f"non-numeric rate for {currency}: {rate!r}"
+            )
+        if not math.isfinite(rate) or rate <= 0:
+            raise RuntimeError(
+                f"could not fetch exchange rates from frankfurter.dev: "
+                f"invalid rate for {currency}: {rate!r}"
+            )
+        factors[currency] = 1.0 / rate
+    return factors
 
 
 def _read_client(filepath: Path) -> PClient:

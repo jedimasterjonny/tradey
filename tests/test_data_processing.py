@@ -1,8 +1,10 @@
 """Tests for _compute_shares, _resolve_currency_factors, and _read_client."""
 
 import io
+import json
 import zipfile
 from unittest.mock import patch
+from urllib.error import URLError
 
 import pytest
 
@@ -11,6 +13,7 @@ from tradey import (
     _SHARE_PRECISION,
     _SIGNATURE,
     _compute_shares,
+    _fetch_exchange_rates,
     _read_client,
     _resolve_currency_factors,
 )
@@ -102,6 +105,98 @@ class TestResolveCurrencyFactors:
             mock.assert_called_once_with("GBP", {"EUR"})
             assert factors["GBX"] == pytest.approx(0.01)
             assert factors["EUR"] == pytest.approx(1.15)
+
+
+class _FakeResponse:
+    """Minimal context-manager stand-in for an HTTP response."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._payload
+
+
+class TestFetchExchangeRates:
+    """Fix #4: FX fetch failures surface as a single clear RuntimeError."""
+
+    def test_success(self):
+        payload = json.dumps({"rates": {"USD": 1.25}}).encode()
+        with patch(
+            "tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)
+        ):
+            factors = _fetch_exchange_rates("GBP", {"USD"})
+        assert factors["USD"] == pytest.approx(1.0 / 1.25)
+
+    def test_no_currencies_short_circuits(self):
+        """No currencies requested → no network call, empty result."""
+        with patch("tradey.urllib.request.urlopen") as mock:
+            assert _fetch_exchange_rates("GBP", set()) == {}
+            mock.assert_not_called()
+
+    def test_network_error_raises_runtimeerror(self):
+        """A URLError (offline/DNS/HTTP) becomes a friendly RuntimeError.
+        Old code lets URLError propagate (RED)."""
+        with (
+            patch("tradey.urllib.request.urlopen", side_effect=URLError("offline")),
+            pytest.raises(RuntimeError, match="could not fetch exchange rates"),
+        ):
+            _fetch_exchange_rates("GBP", {"USD"})
+
+    def test_timeout_raises_runtimeerror(self):
+        with (
+            patch(
+                "tradey.urllib.request.urlopen", side_effect=TimeoutError("timed out")
+            ),
+            pytest.raises(RuntimeError, match="could not fetch exchange rates"),
+        ):
+            _fetch_exchange_rates("GBP", {"USD"})
+
+    def test_malformed_json_raises_runtimeerror(self):
+        """Non-JSON body becomes a RuntimeError. Old code raises
+        JSONDecodeError (RED)."""
+        with (
+            patch(
+                "tradey.urllib.request.urlopen",
+                return_value=_FakeResponse(b"not json at all"),
+            ),
+            pytest.raises(RuntimeError, match="could not fetch exchange rates"),
+        ):
+            _fetch_exchange_rates("GBP", {"USD"})
+
+    def test_missing_rates_key_raises_runtimeerror(self):
+        """A payload without a 'rates' dict becomes a RuntimeError. Old code
+        raises KeyError (RED)."""
+        payload = json.dumps({"base": "GBP"}).encode()
+        with (
+            patch("tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)),
+            pytest.raises(RuntimeError, match="rates"),
+        ):
+            _fetch_exchange_rates("GBP", {"USD"})
+
+    def test_zero_rate_raises_naming_currency(self):
+        """A rate of 0 must be rejected (not divided by). Old code raises
+        ZeroDivisionError (RED)."""
+        payload = json.dumps({"rates": {"USD": 0}}).encode()
+        with (
+            patch("tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)),
+            pytest.raises(RuntimeError, match="USD"),
+        ):
+            _fetch_exchange_rates("GBP", {"USD"})
+
+    def test_negative_rate_raises_naming_currency(self):
+        payload = json.dumps({"rates": {"USD": -1.5}}).encode()
+        with (
+            patch("tradey.urllib.request.urlopen", return_value=_FakeResponse(payload)),
+            pytest.raises(RuntimeError, match="USD"),
+        ):
+            _fetch_exchange_rates("GBP", {"USD"})
 
 
 class TestReadClient:
