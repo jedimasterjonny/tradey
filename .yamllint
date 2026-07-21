@@ -1,0 +1,11 @@
+---
+# yamllint configuration.
+# GitHub workflow files pin actions to 40-char commit SHAs with a trailing
+# version comment (managed by Renovate). Those lines exceed the default 80-char
+# limit, so line-length is relaxed to accommodate them. Everything else stays
+# on yamllint's default rules.
+extends: default
+
+rules:
+  line-length:
+    max: 120

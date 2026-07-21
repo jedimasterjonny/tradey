@@ -1,3 +1,14 @@
 {
-  "typeCheckingMode": "recommended"
+  "typeCheckingMode": "standard",
+  "exclude": [
+    "proto/",
+    "**/__pycache__",
+    ".venv"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "reportAttributeAccessIssue": "none"
+    }
+  ]
 }
