@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 
-from tradey import Portfolio
 from tradey.optimizer import (
     calculate_allocation_deviation,
     hessian,
@@ -12,85 +11,75 @@ from tradey.optimizer import (
 from tradey.optimizer import sse as calculate_sse
 
 
-@pytest.fixture
-def simple_portfolio():
-    """A synthetic 3-asset portfolio for math tests."""
-    return Portfolio(
-        allocations={"Fund A": 6000.0, "Fund B": 3000.0, "Fund C": 1000.0},
-        allocation_targets={"Fund A": 60.0, "Fund B": 30.0, "Fund C": 10.0},
-    )
-
-
 class TestCalculateAllocationDeviation:
-    def test_perfect_allocation(self):
-        """When values exactly match target weights, deviation should be zero."""
-        values = np.array([600.0, 300.0, 100.0])
-        targets = np.array([0.6, 0.3, 0.1])
-        deviation = calculate_allocation_deviation(values, targets)
-        np.testing.assert_allclose(deviation, 0.0, atol=1e-10)
-
-    def test_overweight_first_asset(self):
-        """When first asset is overweight, its deviation should be positive."""
-        values = np.array([800.0, 100.0, 100.0])
-        targets = np.array([0.6, 0.3, 0.1])
-        deviation = calculate_allocation_deviation(values, targets)
-        # Fund A: 800 / (0.6 * 1000) - 1 = 1/3
-        assert deviation[0] == pytest.approx(1 / 3)
-        # Fund B: 100 / (0.3 * 1000) - 1 = -2/3
-        assert deviation[1] == pytest.approx(-2 / 3)
-        # Fund C: 100 / (0.1 * 1000) - 1 = 0
-        assert deviation[2] == pytest.approx(0.0)
-
-    def test_two_assets(self):
-        """Basic two-asset case."""
-        values = np.array([70.0, 30.0])
-        targets = np.array([0.5, 0.5])
-        deviation = calculate_allocation_deviation(values, targets)
-        # 70 / (0.5 * 100) - 1 = 0.4
-        assert deviation[0] == pytest.approx(0.4)
-        # 30 / (0.5 * 100) - 1 = -0.4
-        assert deviation[1] == pytest.approx(-0.4)
+    @pytest.mark.parametrize(
+        ("values", "targets", "expected"),
+        [
+            # Values exactly proportional to targets → zero deviation everywhere.
+            ([600.0, 300.0, 100.0], [0.6, 0.3, 0.1], [0.0, 0.0, 0.0]),
+            # First asset overweight. total=1000:
+            #   800/(0.6*1000)-1 = +1/3, 100/(0.3*1000)-1 = -2/3, 100/(0.1*1000)-1 = 0
+            ([800.0, 100.0, 100.0], [0.6, 0.3, 0.1], [1 / 3, -2 / 3, 0.0]),
+            # Two-asset case. total=100:
+            #   70/(0.5*100)-1 = +0.4, 30/(0.5*100)-1 = -0.4
+            ([70.0, 30.0], [0.5, 0.5], [0.4, -0.4]),
+        ],
+    )
+    def test_deviation(self, values, targets, expected):
+        """Deviation is value/(target*total) - 1, computed component-wise."""
+        deviation = calculate_allocation_deviation(np.array(values), np.array(targets))
+        np.testing.assert_allclose(deviation, expected, atol=1e-10)
 
 
 class TestCalculateSSE:
-    def test_zero_allocation_returns_current_sse(self):
-        """Zero additional allocation should return SSE of current portfolio."""
+    def test_balanced_portfolio_has_zero_sse(self):
+        """A perfectly balanced portfolio with no new cash has zero SSE."""
         current = np.array([6000.0, 3000.0, 1000.0])
         targets = np.array([0.6, 0.3, 0.1])
-        allocations = np.array([0.0, 0.0])
-        indices = (0, 1)
+        result = calculate_sse(np.array([0.0, 0.0]), (0, 1), current, targets)
+        assert result == pytest.approx(0.0, abs=1e-10)
 
-        sse = calculate_sse(allocations, indices, current, targets)
-
-        # Current is perfectly balanced, SSE should be 0
-        assert sse == pytest.approx(0.0, abs=1e-10)
-
-    def test_allocation_improves_sse(self):
+    def test_allocation_to_underweight_reduces_sse(self):
         """Adding to an underweight asset should reduce SSE."""
         current = np.array([7000.0, 2000.0, 1000.0])
         targets = np.array([0.6, 0.3, 0.1])
-
         sse_before = calculate_sse(np.array([0.0]), (1,), current, targets)
-        # Add 1000 to underweight Fund B
         sse_after = calculate_sse(np.array([1000.0]), (1,), current, targets)
         assert sse_after < sse_before
 
-    def test_sse_is_nonnegative(self):
-        """SSE should always be non-negative (sum of squares)."""
-        current = np.array([5000.0, 3000.0, 2000.0])
-        targets = np.array([0.5, 0.3, 0.2])
-        allocations = np.array([100.0, 200.0])
-        sse = calculate_sse(allocations, (0, 2), current, targets)
-        assert sse >= 0
-
-    def test_single_asset_allocation(self):
-        """Allocating to a single asset index."""
-        current = np.array([4000.0, 4000.0, 2000.0])
-        targets = np.array([0.5, 0.3, 0.2])
-        allocations = np.array([500.0])
-        sse = calculate_sse(allocations, (2,), current, targets)
-        assert isinstance(sse, float)
-        assert sse >= 0
+    @pytest.mark.parametrize(
+        ("allocations", "indices", "current", "targets", "expected"),
+        [
+            # [5000,3000,2000] + 100→idx0, 200→idx2 = [5100,3000,2200], total 10300.
+            # dev = [5100/5150-1, 3000/3090-1, 2200/2060-1]
+            #     = [-0.00970874, -0.02912621, 0.06796117]
+            # sse = sum(dev^2) = 0.005561315863889146
+            (
+                [100.0, 200.0],
+                (0, 2),
+                [5000.0, 3000.0, 2000.0],
+                [0.5, 0.3, 0.2],
+                0.005561315863889146,
+            ),
+            # [4000,4000,2000] + 500→idx2 = [4000,4000,2500], total 10500.
+            # dev = [4000/5250-1, 4000/3150-1, 2500/2100-1]
+            #     = [-0.23809524, 0.26984127, 0.19047619]
+            # sse = sum(dev^2) = 0.16578483245149908
+            (
+                [500.0],
+                (2,),
+                [4000.0, 4000.0, 2000.0],
+                [0.5, 0.3, 0.2],
+                0.16578483245149908,
+            ),
+        ],
+    )
+    def test_sse_exact_value(self, allocations, indices, current, targets, expected):
+        """SSE equals the hand-computed sum of squared deviations (not just >=0)."""
+        result = calculate_sse(
+            np.array(allocations), indices, np.array(current), np.array(targets)
+        )
+        assert result == pytest.approx(expected)
 
 
 class TestCalculateJacobian:
@@ -124,6 +113,55 @@ class TestCalculateJacobian:
         # Fund A is overweight, Fund B is underweight
         # Gradient for A should be > gradient for B (adding to A costs more)
         assert jac[0] > jac[1]
+
+
+class TestJacobianConstraintParallelError:
+    """Pin the deliberate jacobian/true-gradient discrepancy (audit correctness #11).
+
+    ``jacobian`` differentiates SSE while treating the portfolio total as a
+    constant. Differentiating SSE properly (see ``sse``, whose deviation uses
+    ``total = sum(all values)``) adds a term ``-C`` that is *identical for every
+    component*: it depends only on the shared portfolio total, not on which
+    asset is being differentiated. Hence ``analytic - numeric`` is a vector with
+    (near-)constant components — i.e. parallel to the all-ones vector.
+
+    Why this is safe: the equality constraint ``sum(allocations) == investment``
+    means feasible steps lie in the ``sum == 0`` subspace, which is orthogonal to
+    the all-ones direction — so a constant offset in the gradient does not change
+    the constrained optimum. It is harmless *only while that constraint exists*.
+    This test fails if a change makes the error vary across components (a
+    non-constant error would no longer be projected out and would bias the solve).
+    """
+
+    def test_analytic_minus_numeric_is_constant_across_components(self):
+        current = np.array([7000.0, 2000.0, 1000.0])
+        targets = np.array([0.6, 0.3, 0.1])
+        combination = (0, 1, 2)
+        # An off-optimum, non-proportional point so both gradients are non-trivial.
+        allocations = np.array([100.0, 800.0, 100.0])
+
+        analytic = jacobian(allocations, combination, current, targets)
+
+        # Central-difference numeric gradient of sse (step is tiny vs the
+        # ~100-800 allocation scale, so truncation error stays negligible).
+        step = 0.1
+        numeric = np.empty_like(allocations)
+        for k in range(len(allocations)):
+            plus = allocations.copy()
+            plus[k] += step
+            minus = allocations.copy()
+            minus[k] -= step
+            numeric[k] = (
+                calculate_sse(plus, combination, current, targets)
+                - calculate_sse(minus, combination, current, targets)
+            ) / (2 * step)
+
+        diff = analytic - numeric
+        # The discrepancy is a genuine, non-zero constant offset (guards against
+        # a degenerate pass where both gradients happen to be ~0).
+        assert abs(diff.mean()) > 1e-7
+        # ...and every component barely deviates from that shared mean.
+        assert np.max(np.abs(diff - diff.mean())) < 1e-9
 
 
 class TestCalculateHessian:

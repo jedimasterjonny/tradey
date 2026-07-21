@@ -11,7 +11,7 @@ import pytest
 from proto.client_pb2 import PClient, PTransaction
 from tradey.fx import fetch_exchange_rates as _fetch_exchange_rates
 from tradey.fx import resolve_currency_factors as _resolve_currency_factors
-from tradey.loader import _SHARE_PRECISION, _SIGNATURE
+from tradey.loader import _SHARE_PRECISION
 from tradey.loader import compute_shares as _compute_shares
 from tradey.loader import load_client as _read_client
 
@@ -204,16 +204,7 @@ class TestFetchExchangeRates:
 
 
 class TestReadClient:
-    def _make_portfolio_file(self, tmp_path, payload: bytes, signature=_SIGNATURE):
-        """Create a synthetic .portfolio zip file."""
-        filepath = tmp_path / "test.portfolio"
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("data.portfolio", signature + payload)
-        filepath.write_bytes(buf.getvalue())
-        return filepath
-
-    def test_reads_valid_file(self, tmp_path):
+    def test_reads_valid_file(self, make_portfolio_zip):
         """Should parse a valid .portfolio file with minimal protobuf data."""
         client = PClient()
         client.version = 1
@@ -223,7 +214,7 @@ class TestReadClient:
         sec.name = "Test Fund"
         sec.currencyCode = "GBP"
 
-        filepath = self._make_portfolio_file(tmp_path, client.SerializeToString())
+        filepath = make_portfolio_zip(client.SerializeToString())
         result = _read_client(filepath)
 
         assert result.version == 1
@@ -231,13 +222,13 @@ class TestReadClient:
         assert len(result.securities) == 1
         assert result.securities[0].name == "Test Fund"
 
-    def test_invalid_signature_raises(self, tmp_path):
+    def test_invalid_signature_raises(self, make_portfolio_zip):
         """Should raise ValueError for files with wrong signature."""
-        filepath = self._make_portfolio_file(tmp_path, b"somedata", signature=b"BADsig")
+        filepath = make_portfolio_zip(b"somedata", signature=b"BADsig")
         with pytest.raises(ValueError, match="Not a Portfolio Performance protobuf"):
             _read_client(filepath)
 
-    def test_roundtrip_with_transactions(self, tmp_path):
+    def test_roundtrip_with_transactions(self, make_portfolio_zip):
         """Transactions should survive the serialization roundtrip."""
         client = PClient()
         t = client.transactions.add()
@@ -246,7 +237,7 @@ class TestReadClient:
         t.security = "sec-1"
         t.shares = 50 * SHARES
 
-        filepath = self._make_portfolio_file(tmp_path, client.SerializeToString())
+        filepath = make_portfolio_zip(client.SerializeToString())
         result = _read_client(filepath)
 
         assert len(result.transactions) == 1
@@ -269,8 +260,8 @@ class TestReadClient:
         with pytest.raises(ValueError, match="not a valid Portfolio Performance file"):
             _read_client(filepath)
 
-    def test_corrupt_protobuf_raises(self, tmp_path):
+    def test_corrupt_protobuf_raises(self, make_portfolio_zip):
         """A valid signature with a corrupt protobuf should raise ValueError."""
-        filepath = self._make_portfolio_file(tmp_path, b"\x08")
+        filepath = make_portfolio_zip(b"\x08")
         with pytest.raises(ValueError, match="not a valid Portfolio Performance file"):
             _read_client(filepath)
