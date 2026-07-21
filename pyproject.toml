@@ -23,6 +23,9 @@ include = ["tradey.py", "proto"]
 [tool.ruff]
 extend-exclude = ["proto/"]
 
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

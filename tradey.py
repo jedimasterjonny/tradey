@@ -1,22 +1,21 @@
-from scipy.optimize import minimize, LinearConstraint, Bounds
-from prettytable import PrettyTable
 import argparse
-import multiprocessing
-from functools import partial
 import itertools
 import json
-from http.client import HTTPResponse
+import multiprocessing
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
+from functools import partial
+from http.client import HTTPResponse
 from pathlib import Path
 from typing import NamedTuple, cast
 
 import numpy as np
 from google.protobuf.message import DecodeError
+from prettytable import PrettyTable
+from scipy.optimize import Bounds, LinearConstraint, minimize
 
 from proto.client_pb2 import PClient
-
 
 # Precision constants used by Portfolio Performance
 _SHARE_PRECISION = 1e8
@@ -67,7 +66,8 @@ def _read_client(filepath: Path) -> PClient:
     signature = raw[: len(_SIGNATURE)]
     if signature != _SIGNATURE:
         raise ValueError(
-            f"Not a Portfolio Performance protobuf file (expected signature {_SIGNATURE!r}, got {signature!r})"
+            f"Not a Portfolio Performance protobuf file "
+            f"(expected signature {_SIGNATURE!r}, got {signature!r})"
         )
 
     client = PClient()
@@ -97,7 +97,7 @@ def _resolve_currency_factors(
     base_currency: str,
     assigned_currencies: set[str],
 ) -> dict[str, float]:
-    """Build a mapping from each currency to its conversion factor to the base currency."""
+    """Map each currency to its conversion factor to the base currency."""
     factors: dict[str, float] = {base_currency: 1.0}
     for currency in assigned_currencies:
         fixed = _FIXED_CURRENCY_FACTORS.get(currency, {})
@@ -146,8 +146,8 @@ class Portfolio:
         cls,
         filepath: Path,
         taxonomy_name: str = "Asset Allocation",
-    ) -> "Portfolio":
-        """Parse a Portfolio Performance .portfolio file and return a Portfolio instance.
+    ) -> Portfolio:
+        """Parse a .portfolio file and return a Portfolio instance.
 
         Args:
             filepath: Path to the .portfolio file (zip containing protobuf data).
@@ -424,7 +424,7 @@ class Portfolio:
         print(f"Invest in: {param_names}")
 
         for idx, amount_f in zip(
-            best_combination, cast(list[float], best_allocations.tolist())
+            best_combination, cast(list[float], best_allocations.tolist()), strict=False
         ):
             name = self.investment_names[idx]
             percent = (amount_f / additional_investment) * 100

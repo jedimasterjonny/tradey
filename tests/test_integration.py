@@ -2,11 +2,12 @@
 
 import io
 import zipfile
+
 import numpy as np
 import pytest
 
 from proto.client_pb2 import PClient
-from tradey import Portfolio, _SIGNATURE
+from tradey import _SIGNATURE, Portfolio
 
 # Protobuf int precision constants
 _SHARE_INT = int(1e8)
@@ -50,13 +51,13 @@ def _make_synthetic_portfolio_file(tmp_path):
     tx_a.uuid = "tx-a"
     tx_a.type = 0  # PURCHASE
     tx_a.security = "sec-a"
-    tx_a.shares = 600 * _SHARE_INT  # 600 shares × £10 = £6000
+    tx_a.shares = 600 * _SHARE_INT  # 600 shares x £10 = £6000
 
     tx_b = client.transactions.add()
     tx_b.uuid = "tx-b"
     tx_b.type = 0
     tx_b.security = "sec-b"
-    tx_b.shares = 800 * _SHARE_INT  # 800 shares × £5 = £4000
+    tx_b.shares = 800 * _SHARE_INT  # 800 shares x £5 = £4000
 
     # Taxonomy
     tax = client.taxonomies.add()
@@ -128,15 +129,15 @@ class TestPortfolioFromFile:
         filepath = _make_synthetic_portfolio_file(tmp_path)
         portfolio = Portfolio.from_portfolio_file(filepath)
 
-        # Equity 60% × Global Equity 100% = 60%
+        # Equity 60% x Global Equity 100% = 60%
         assert portfolio.allocation_targets["Global Equity"] == pytest.approx(60.0)
-        # Bonds 40% × Global Bonds 100% = 40%
+        # Bonds 40% x Global Bonds 100% = 40%
         assert portfolio.allocation_targets["Global Bonds"] == pytest.approx(40.0)
 
     def test_missing_taxonomy_raises(self, tmp_path):
         """Should raise ValueError for unknown taxonomy name."""
         filepath = _make_synthetic_portfolio_file(tmp_path)
-        with pytest.raises(ValueError, match="Taxonomy .* not found"):
+        with pytest.raises(ValueError, match=r"Taxonomy .* not found"):
             Portfolio.from_portfolio_file(filepath, taxonomy_name="Nonexistent")
 
 
@@ -187,7 +188,9 @@ class TestPortfolioOptimize:
         names = imbalanced_portfolio.investment_names
         alloc_map = {
             names[i]: amt
-            for i, amt in zip(result.best_combination, result.best_allocations)
+            for i, amt in zip(
+                result.best_combination, result.best_allocations, strict=False
+            )
         }
         assert alloc_map.get("Bonds", 0) > alloc_map.get("Equities", 0)
 

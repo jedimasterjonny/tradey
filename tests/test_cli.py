@@ -11,7 +11,7 @@ from tradey import parse_arguments
 class TestParseArguments:
     def _parse(self, args: list[str]):
         """Call parse_arguments with the given CLI args."""
-        with patch.object(sys, "argv", ["tradey"] + args):
+        with patch.object(sys, "argv", ["tradey", *args]):
             return parse_arguments()
 
     def test_required_args(self):

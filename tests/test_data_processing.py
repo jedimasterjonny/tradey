@@ -1,4 +1,4 @@
-"""Tests for data processing: _compute_shares, _resolve_currency_factors, _read_client."""
+"""Tests for _compute_shares, _resolve_currency_factors, and _read_client."""
 
 import io
 import zipfile
