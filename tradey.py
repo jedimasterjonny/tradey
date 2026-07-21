@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import NamedTuple, cast
 
 import numpy as np
+from google.protobuf.message import DecodeError
 
 from proto.client_pb2 import PClient
 
@@ -53,8 +54,15 @@ def _fetch_exchange_rates(base_currency: str, currencies: set[str]) -> dict[str,
 
 def _read_client(filepath: Path) -> PClient:
     """Read and parse a Portfolio Performance .portfolio file."""
-    with zipfile.ZipFile(filepath, "r") as zf:
-        raw = zf.read("data.portfolio")
+    try:
+        with zipfile.ZipFile(filepath, "r") as zf:
+            raw = zf.read("data.portfolio")
+    except zipfile.BadZipFile as e:
+        raise ValueError(f"not a valid Portfolio Performance file: {e}") from e
+    except KeyError as e:
+        raise ValueError(
+            "not a valid Portfolio Performance file: missing 'data.portfolio' member"
+        ) from e
 
     signature = raw[: len(_SIGNATURE)]
     if signature != _SIGNATURE:
@@ -63,7 +71,10 @@ def _read_client(filepath: Path) -> PClient:
         )
 
     client = PClient()
-    _ = client.ParseFromString(raw[len(_SIGNATURE) :])
+    try:
+        _ = client.ParseFromString(raw[len(_SIGNATURE) :])
+    except DecodeError as e:
+        raise ValueError(f"not a valid Portfolio Performance file: {e}") from e
     return client
 
 

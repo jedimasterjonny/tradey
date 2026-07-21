@@ -152,3 +152,26 @@ class TestReadClient:
 
         assert len(result.transactions) == 1
         assert result.transactions[0].shares == 50 * SHARES
+
+    def test_non_zip_file_raises(self, tmp_path):
+        """A file that isn't a zip should raise a friendly ValueError."""
+        filepath = tmp_path / "test.portfolio"
+        filepath.write_bytes(b"this is not a zip file")
+        with pytest.raises(ValueError, match="not a valid Portfolio Performance file"):
+            _read_client(filepath)
+
+    def test_missing_data_member_raises(self, tmp_path):
+        """A zip missing the 'data.portfolio' member should raise ValueError."""
+        filepath = tmp_path / "test.portfolio"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("other.txt", b"nothing useful here")
+        filepath.write_bytes(buf.getvalue())
+        with pytest.raises(ValueError, match="not a valid Portfolio Performance file"):
+            _read_client(filepath)
+
+    def test_corrupt_protobuf_raises(self, tmp_path):
+        """A valid signature with a corrupt protobuf should raise ValueError."""
+        filepath = self._make_portfolio_file(tmp_path, b"\x08")
+        with pytest.raises(ValueError, match="not a valid Portfolio Performance file"):
+            _read_client(filepath)
