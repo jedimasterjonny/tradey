@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tradey import parse_arguments
+from tradey.cli import parse_arguments
 
 
 class TestParseArguments:

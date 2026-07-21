@@ -8,7 +8,10 @@ import numpy as np
 import pytest
 
 from proto.client_pb2 import PClient
-from tradey import _SIGNATURE, Portfolio
+from tradey import Portfolio
+from tradey.loader import _SIGNATURE
+from tradey.optimizer import calculate_allocation_deviation
+from tradey.optimizer import sse as calculate_sse
 
 # Protobuf int precision constants
 _SHARE_INT = int(1e8)
@@ -197,7 +200,7 @@ class TestPortfolioOptimize:
         targets = imbalanced_portfolio.target_weights
 
         # SSE with no additional investment
-        sse_before = Portfolio._calculate_sse(np.array([0.0]), (0,), current, targets)
+        sse_before = calculate_sse(np.array([0.0]), (0,), current, targets)
 
         result = imbalanced_portfolio.optimize(1000.0, n_assets=2)
         assert result.min_sse < sse_before
@@ -247,26 +250,6 @@ class TestPortfolioOptimize:
         assert result.best_allocations[0] == pytest.approx(200.0)
 
 
-class _SerialPool:
-    """Drop-in replacement for multiprocessing.Pool that maps in-process.
-
-    Running the optimization in the main process lets a monkeypatched
-    ``tradey.minimize`` take effect (a real Pool spawns fresh subprocesses).
-    """
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def map(self, func, iterable):
-        return [func(item) for item in iterable]
-
-
 class _FakeMinimizeResult:
     def __init__(self, x, fun, success):
         self.x = np.asarray(x, dtype=float)
@@ -296,8 +279,7 @@ class TestOptimizeConvergence:
             return _FakeMinimizeResult([1000.0 / n] * n, 1.0, False)
 
         with (
-            patch("tradey.multiprocessing.Pool", _SerialPool),
-            patch("tradey.minimize", side_effect=fake_minimize),
+            patch("tradey.optimizer.minimize", side_effect=fake_minimize),
             pytest.raises(ValueError, match="converge"),
         ):
             balanced_portfolio.optimize(1000.0, n_assets=2)
@@ -311,8 +293,7 @@ class TestOptimizeConvergence:
             return _FakeMinimizeResult([0.0] * n, 0.0, True)
 
         with (
-            patch("tradey.multiprocessing.Pool", _SerialPool),
-            patch("tradey.minimize", side_effect=fake_minimize),
+            patch("tradey.optimizer.minimize", side_effect=fake_minimize),
             pytest.raises(ValueError, match="sum"),
         ):
             balanced_portfolio.optimize(1000.0, n_assets=2)
@@ -326,8 +307,7 @@ class TestOptimizeConvergence:
             return _FakeMinimizeResult([1500.0, -500.0], 0.0, True)
 
         with (
-            patch("tradey.multiprocessing.Pool", _SerialPool),
-            patch("tradey.minimize", side_effect=fake_minimize),
+            patch("tradey.optimizer.minimize", side_effect=fake_minimize),
             pytest.raises(ValueError, match="negative"),
         ):
             balanced_portfolio.optimize(1000.0, n_assets=2)
@@ -340,8 +320,7 @@ class TestOptimizeConvergence:
             return _FakeMinimizeResult([1000.0 + 1e-12, -1e-12], 0.0, True)
 
         with (
-            patch("tradey.multiprocessing.Pool", _SerialPool),
-            patch("tradey.minimize", side_effect=fake_minimize),
+            patch("tradey.optimizer.minimize", side_effect=fake_minimize),
         ):
             result = balanced_portfolio.optimize(1000.0, n_assets=2)
         assert all(a >= 0.0 for a in result.best_allocations)
@@ -368,6 +347,17 @@ class TestZeroTargetAndEmptyPortfolio:
         with pytest.raises(ValueError, match=r"(?i)no value|empty"):
             Portfolio.from_portfolio_file(filepath)
 
+    def test_all_zero_target_weights_raises(self, tmp_path):
+        """When ALL sub-category weights are zero (targets sum to zero), the
+        loader must raise the friendly target-weight ValueError, not a
+        ZeroDivisionError from the normalization step (which divides by the
+        zero sum before Portfolio.__post_init__ validation runs)."""
+        filepath = _make_synthetic_portfolio_file(
+            tmp_path, global_eq_sub_weight=0, global_bonds_sub_weight=0
+        )
+        with pytest.raises(ValueError, match="target weight"):
+            Portfolio.from_portfolio_file(filepath)
+
 
 class TestTargetNormalization:
     """Fix #3: target weights are renormalized to sum to 1.0."""
@@ -384,7 +374,7 @@ class TestTargetNormalization:
         )
         portfolio = Portfolio.from_portfolio_file(filepath)
 
-        deviation = Portfolio._calculate_allocation_deviation(
+        deviation = calculate_allocation_deviation(
             portfolio.current_values, portfolio.target_weights
         )
         np.testing.assert_allclose(deviation, 0.0, atol=1e-9)
@@ -413,7 +403,7 @@ class TestCurrencyCoverage:
         reports it distinctly. Old code raises a bare KeyError later (RED)."""
         filepath = _make_synthetic_portfolio_file(tmp_path, sec_a_currency="")
         with (
-            patch("tradey._fetch_exchange_rates", return_value={}),
+            patch("tradey.fx.fetch_exchange_rates", return_value={}),
             pytest.raises(ValueError, match="<blank>"),
         ):
             Portfolio.from_portfolio_file(filepath)
@@ -423,7 +413,7 @@ class TestCurrencyCoverage:
         it. Old code raises a bare KeyError later (RED)."""
         filepath = _make_synthetic_portfolio_file(tmp_path, sec_a_currency="USD")
         with (
-            patch("tradey._fetch_exchange_rates", return_value={}),
+            patch("tradey.fx.fetch_exchange_rates", return_value={}),
             pytest.raises(ValueError, match="USD"),
         ):
             Portfolio.from_portfolio_file(filepath)
